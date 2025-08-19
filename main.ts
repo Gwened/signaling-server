@@ -5,9 +5,19 @@ import { makeLivelinessStatus } from "./metrics";
 import { getCORSAllowedOriginOrResponse, makeHeaders } from "./cors";
 
 const peers = new Map<string, ServerWebSocket<unknown>>();
+const botsKnownByPeers = new Map<string, {id: string, createdAt: Date}>();
 
 const allowedMethods = "GET, OPTIONS";
 
+const BotLifetimeMs = Bun.env.BOT_LIFETIME_MS ? parseInt(Bun.env.BOT_LIFETIME_MS) : 20000;
+
+function makeBotPeerData(peerId: string) {
+  const botId = `bot-${randomUUID().slice(0, 18)}`;
+  botsKnownByPeers.set(peerId, {id: botId, createdAt: new Date()});
+  return {
+    id: botId,
+  };
+}
 
 const server = Bun.serve({
   port: 3001,
@@ -46,10 +56,13 @@ const server = Bun.serve({
         // Send the list of other peers to the new client
         const otherPeers = Array.from(peers.keys()).filter((id) => id !== peerId);
         console.log("New peer connected", peerId, "- sending other peers", otherPeers);
-        ws.send(JSON.stringify({ type: "init", peerId, peers: otherPeers }));
+        ws.send(JSON.stringify({
+          type: "init",
+          peerId,
+          peers: (otherPeers.length > 0) ? otherPeers : [makeBotPeerData(peerId).id]
+        }));
 
         // Send the new client to the other clients
-        console.log("About to send peer-joined to", peerId);
         for (const [id, peerWs] of peers.entries()) {
             if (id !== peerId && peerWs.readyState === WebSocket.OPEN) {
                 peerWs.send(JSON.stringify({ type: "peer-joined", peerId }));
@@ -62,12 +75,16 @@ const server = Bun.serve({
         const msg = JSON.parse(data.toString());
         console.log("Received message", msg);
         if (msg.type === "signal" && typeof msg.targetId === "string") {
-            const target = peers.get(msg.targetId);
-            if (target && target.readyState === WebSocket.OPEN) {
-                target.send(JSON.stringify({ ...msg, peerId: (ws as any).peerId }));
-            } else {
-                ws.send(JSON.stringify({ type: "error", message: "Peer not available" }));
-            }
+          if (msg.targetId.startsWith("bot-")) {
+            // Ignore bot messages
+            return;
+          }
+          const target = peers.get(msg.targetId);
+          if (target && target.readyState === WebSocket.OPEN) {
+              target.send(JSON.stringify({ ...msg, peerId: (ws as any).peerId }));
+          } else {
+              ws.send(JSON.stringify({ type: "error", message: "Peer not available" }));
+          }
         }
       } catch {
         // ignore
@@ -89,5 +106,19 @@ const server = Bun.serve({
     },
   },
 });
+
+const globalInterval = setInterval(() => {
+  for (const [peerId, botData] of botsKnownByPeers.entries()) {
+    if (Date.now() - botData.createdAt.getTime() > BotLifetimeMs) {
+      const peerWs = peers.get(peerId);
+      console.log("Bot", botData.id, "has expired, notifying", peerId);
+      if (peerWs && peerWs.readyState === WebSocket.OPEN) {
+        console.log("Notifying", peerId, "that", botData.id, "has expired");
+        peerWs.send(JSON.stringify({ type: "peer-left", peerId: botData.id }));
+      }
+      botsKnownByPeers.delete(peerId);
+    }
+  }
+}, 2500);
 
 console.log("Signaling server running on ws://localhost:3001");
