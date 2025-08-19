@@ -1,0 +1,13 @@
+{
+  "name": "signaling-server",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "private": true,
+  "scripts": {
+    "dev": "bun run main.ts"
+  }
+}
