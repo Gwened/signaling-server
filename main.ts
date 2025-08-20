@@ -9,7 +9,8 @@ const botsKnownByPeers = new Map<string, {id: string, createdAt: Date}>();
 
 const allowedMethods = "GET, OPTIONS";
 
-const BotLifetimeMs = Bun.env.BOT_LIFETIME_MS ? parseInt(Bun.env.BOT_LIFETIME_MS) : 20000;
+const BotsEnabled = (Bun.env.BOTS_ENABLED === "1") || (Bun.env.DEV === "true");
+const BotLifetimeMs = Bun.env.BOT_LIFETIME_MS ? parseInt(Bun.env.BOT_LIFETIME_MS) : 18000;
 
 function makeBotPeerData(peerId: string) {
   const botId = `bot-${randomUUID().slice(0, 18)}`;
@@ -59,7 +60,9 @@ const server = Bun.serve({
         ws.send(JSON.stringify({
           type: "init",
           peerId,
-          peers: (otherPeers.length > 0) ? otherPeers : [makeBotPeerData(peerId).id]
+          peers: (otherPeers.length > 0)
+            ? otherPeers
+            : (BotsEnabled ? [makeBotPeerData(peerId).id] : [])
         }));
 
         // Send the new client to the other clients
