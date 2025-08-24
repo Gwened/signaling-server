@@ -4,20 +4,78 @@ import { randomUUID } from "crypto";
 import { makeLivelinessStatus } from "./metrics";
 import { getCORSAllowedOriginOrResponse, makeHeaders } from "./cors";
 
-const peers = new Map<string, ServerWebSocket<unknown>>();
-const botsKnownByPeers = new Map<string, {id: string, createdAt: Date}>();
+interface PeerRecord {
+  ws: ServerWebSocket<unknown>;
+  metadata: {flag: string};
+}
+
+interface PeerDiscoveryPayload {
+  id: string;
+  metadata: {flag: string};
+}
+
+interface PeerInitEventData {
+  type: "init";
+  peerId: string;
+  peers: PeerDiscoveryPayload[];
+}
+
+interface PeerJoinedEventData  {
+  type: "peer-joined";
+  peerId: string;
+  metadata: {flag: string};
+}
+
+interface PeerLeftEventData {
+  type: "peer-left";
+  peerId: string;
+}
+
+interface PresenceSignal {
+  type: "signal",
+  signalType: unknown
+  targetId: string,
+  sdp?: unknown,
+  candidate?: unknown
+}
+
+interface PeerSignalEventData extends PresenceSignal {
+  peerId: string; // from
+}
+
+interface PeerErrorEventData {
+  type: "error";
+  message: string;
+}
+
+function sendPeerEvent<T extends PeerInitEventData|PeerJoinedEventData|PeerLeftEventData|PeerSignalEventData|PeerErrorEventData>(ws: ServerWebSocket<unknown>, payload: T) {
+  ws.send(JSON.stringify(payload));
+}
+
+const peers = new Map<string, PeerRecord>(); // indexed by peerId
+const botsKnownByPeers = new Map<string, {id: string, createdAt: Date}>(); // indexed by peerId
 
 const allowedMethods = "GET, OPTIONS";
 
 const BotsEnabled = (Bun.env.BOTS_ENABLED === "1") || (Bun.env.DEV === "true");
 const BotLifetimeMs = Bun.env.BOT_LIFETIME_MS ? parseInt(Bun.env.BOT_LIFETIME_MS) : 18000;
 
-function makeBotPeerData(peerId: string) {
+function makeBotPeerData(peerId: string): PeerDiscoveryPayload {
   const botId = `bot-${randomUUID().slice(0, 18)}`;
   botsKnownByPeers.set(peerId, {id: botId, createdAt: new Date()});
   return {
     id: botId,
+    metadata: {flag: ""},
   };
+}
+
+function makeOtherPeersList(peers: Map<string, PeerRecord>, peerId: string): PeerDiscoveryPayload[] {
+  return Array.from(peers.entries()).reduce((acc, [id, {metadata}]) => {
+    if (id !== peerId) {
+      acc.push({id, metadata});
+    }
+    return acc;
+  }, [] as {id: string, metadata: {flag: string}}[]);
 }
 
 const server = Bun.serve({
@@ -52,41 +110,49 @@ const server = Bun.serve({
         // Assign a unique ID to the new client connecting
         const peerId = randomUUID();
         (ws as any).peerId = peerId;
-        peers.set(peerId, ws);
-
-        // Send the list of other peers to the new client
-        const otherPeers = Array.from(peers.keys()).filter((id) => id !== peerId);
-        console.log("New peer connected", peerId, "- sending other peers", otherPeers);
-        ws.send(JSON.stringify({
-          type: "init",
-          peerId,
-          peers: (otherPeers.length > 0)
-            ? otherPeers
-            : (BotsEnabled ? [makeBotPeerData(peerId).id] : [])
-        }));
-
-        // Send the new client to the other clients
-        for (const [id, peerWs] of peers.entries()) {
-            if (id !== peerId && peerWs.readyState === WebSocket.OPEN) {
-                peerWs.send(JSON.stringify({ type: "peer-joined", peerId }));
-            }
-        }
+        peers.set(peerId, {ws, metadata: {flag: ""}});
     },
 
     message(ws, data) {
       try {
         const msg = JSON.parse(data.toString());
         console.log("Received message", msg);
+        if (msg.type === "hello" && typeof msg.metadata?.flag === "string") {
+          const peerId = (ws as any).peerId;
+          const peer = peers.get(peerId);
+          if (peer) {
+            peers.set(peerId, {ws, metadata: {flag: msg.metadata.flag}});
+            
+            // Send the list of other peers to the new client
+            console.log("New peer connected", (ws as any).peerId, "- sending other peers");
+            sendPeerEvent(ws, {
+              type: "init",
+              peerId,
+              peers: ((peers.size > 1)
+                ? makeOtherPeersList(peers, peerId)
+                : (BotsEnabled ? [makeBotPeerData(peerId)] : [])
+                )
+            } satisfies PeerInitEventData);
+
+            // Send the new client to the other clients
+            for (const [id, {ws, metadata}] of peers.entries()) {
+              if (id !== peerId && ws.readyState === WebSocket.OPEN) {
+                sendPeerEvent(ws, { type: "peer-joined", peerId, metadata } satisfies PeerJoinedEventData);
+              }
+            }
+          }
+        }
         if (msg.type === "signal" && typeof msg.targetId === "string") {
-          if (msg.targetId.startsWith("bot-")) {
+          const signal = msg as PresenceSignal;
+          if (signal.targetId.startsWith("bot-")) {
             // Ignore bot messages
             return;
           }
-          const target = peers.get(msg.targetId);
-          if (target && target.readyState === WebSocket.OPEN) {
-              target.send(JSON.stringify({ ...msg, peerId: (ws as any).peerId }));
+          const target = peers.get(signal.targetId);
+          if (target && target.ws.readyState === WebSocket.OPEN) {
+            sendPeerEvent(target.ws, { ...signal, peerId: (ws as any).peerId } satisfies PeerSignalEventData);
           } else {
-              ws.send(JSON.stringify({ type: "error", message: "Peer not available" }));
+            sendPeerEvent(ws, { type: "error", message: "Peer not available" } satisfies PeerErrorEventData);
           }
         }
       } catch {
@@ -100,9 +166,9 @@ const server = Bun.serve({
             peers.delete(peerId);
 
             // Tell the other peers that this peer has left
-            for (const peerWs of peers.values()) {
-                if (peerWs.readyState === WebSocket.OPEN) {
-                    peerWs.send(JSON.stringify({ type: "peer-left", peerId }));
+            for (const peer of peers.values()) {
+                if (peer.ws.readyState === WebSocket.OPEN) {
+                    sendPeerEvent(peer.ws, { type: "peer-left", peerId } satisfies PeerLeftEventData);
                 }
             }
         }    
@@ -115,9 +181,9 @@ const globalInterval = setInterval(() => {
     if (Date.now() - botData.createdAt.getTime() > BotLifetimeMs) {
       const peerWs = peers.get(peerId);
       console.log("Bot", botData.id, "has expired, notifying", peerId);
-      if (peerWs && peerWs.readyState === WebSocket.OPEN) {
+      if (peerWs && peerWs.ws.readyState === WebSocket.OPEN) {
         console.log("Notifying", peerId, "that", botData.id, "has expired");
-        peerWs.send(JSON.stringify({ type: "peer-left", peerId: botData.id }));
+        peerWs.ws.send(JSON.stringify({ type: "peer-left", peerId: botData.id } satisfies PeerLeftEventData));
       }
       botsKnownByPeers.delete(peerId);
     }
