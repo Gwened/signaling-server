@@ -110,6 +110,11 @@ const server = Bun.serve({
         // Assign a unique ID to the new client connecting
         const peerId = randomUUID();
         (ws as any).peerId = peerId;
+        
+        // Get client IP address
+        const clientIP = (ws as any).remoteAddress || 'unknown';
+        console.log(`New peer connected - ID: ${peerId}, IP: ${clientIP}`);
+        
         peers.set(peerId, {ws, metadata: {flag: ""}});
     },
 

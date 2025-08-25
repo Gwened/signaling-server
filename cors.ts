@@ -5,6 +5,11 @@ function restrictOriginFromRequest(request: Request): string|null {
         return "*";
     }
     const productionOriginsWhitelist = [process.env.OFFICIAL_ORIGIN ?? "https://demo.netismic.com"];
+    const clientIP = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 
+                     request.headers.get('x-real-ip') || 
+                     (request as any).socket?.remoteAddress || 
+                     'unknown';
+    console.log(new Date().toISOString(), "CORS check for", clientIP, "Origin:", request.headers.get("origin"), "->", request.url);
     let origin = request.headers.get("origin");
     if (origin && productionOriginsWhitelist.includes(origin))
         return origin;
