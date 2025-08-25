@@ -3,6 +3,8 @@ import type { ServerWebSocket } from "bun";
 import { randomUUID } from "crypto";
 import { makeLivelinessStatus } from "./metrics";
 import { getCORSAllowedOriginOrResponse, makeHeaders } from "./cors";
+import sendTelegramNotification from "./telegram";
+
 
 interface PeerRecord {
   ws: ServerWebSocket<unknown>;
@@ -59,6 +61,7 @@ const allowedMethods = "GET, OPTIONS";
 
 const BotsEnabled = (Bun.env.BOTS_ENABLED === "1") || (Bun.env.DEV === "true");
 const BotLifetimeMs = Bun.env.BOT_LIFETIME_MS ? parseInt(Bun.env.BOT_LIFETIME_MS) : 18000;
+const NotificationsEnabled = (Bun.env.ENABLE_NOTIFICATIONS === "1");
 
 function makeBotPeerData(peerId: string): PeerDiscoveryPayload {
   const botId = `bot-${randomUUID().slice(0, 18)}`;
@@ -126,17 +129,17 @@ const server = Bun.serve({
           const peerId = (ws as any).peerId;
           const peer = peers.get(peerId);
           if (peer) {
-            peers.set(peerId, {ws, metadata: {flag: msg.metadata.flag}});
+            peers.set(peerId, {ws, metadata: {flag: msg.metadata.flag.substring(0, 8)}}); // make sure to avoid the whole client-passed metadata for security
             
             // Send the list of other peers to the new client
-            console.log("New peer connected", (ws as any).peerId, "- sending other peers");
+            console.log("Peer", (ws as any).peerId, "says hello, sending other peers");
+            const isAlone = (peers.size === 1);
             sendPeerEvent(ws, {
               type: "init",
               peerId,
-              peers: ((peers.size > 1)
-                ? makeOtherPeersList(peers, peerId)
-                : (BotsEnabled ? [makeBotPeerData(peerId)] : [])
-                )
+              peers: isAlone
+                ? (BotsEnabled ? [makeBotPeerData(peerId)] : [])
+                : makeOtherPeersList(peers, peerId)
             } satisfies PeerInitEventData);
 
             // Send the new client to the other clients
@@ -145,7 +148,13 @@ const server = Bun.serve({
                 sendPeerEvent(ws, { type: "peer-joined", peerId, metadata } satisfies PeerJoinedEventData);
               }
             }
+
+            if (isAlone && NotificationsEnabled) {
+              const message = `<b>A visitor from ${msg.metadata?.flag} is online</b>`;
+              sendTelegramNotification(message);
+            }
           }
+          return;
         }
         if (msg.type === "signal" && typeof msg.targetId === "string") {
           const signal = msg as PresenceSignal;
@@ -159,9 +168,10 @@ const server = Bun.serve({
           } else {
             sendPeerEvent(ws, { type: "error", message: "Peer not available" } satisfies PeerErrorEventData);
           }
+          return;
         }
       } catch {
-        // ignore
+        console.error("Error processing message", data);
       }
     },
 
