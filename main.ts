@@ -91,7 +91,11 @@ const server = Bun.serve({
     const allowedOrigin = allowedOriginOrResponse;
 
     if (req.headers.get("upgrade") === "websocket") {
-      const success = server.upgrade(req);
+      const success = server.upgrade(req, {
+        headers: {
+          "Connection": "Keep-Alive"
+        }
+      });
       if (!success) return new Response("Upgrade failed", { status: 500 });
       return undefined;
     }
