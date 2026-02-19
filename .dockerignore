@@ -1,0 +1,17 @@
+node_modules
+.git
+.gitignore
+*.md
+.env
+.env.*
+.cursor
+*.log
+coverage
+dist
+out
+*.lcov
+.cache
+*.tsbuildinfo
+.idea
+.DS_Store
+run-local.sh
