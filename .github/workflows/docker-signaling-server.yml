@@ -6,13 +6,13 @@ on:
       - main
       - master
     paths:
-      - 'backend/signaling-server/**'
+      - '**'
   pull_request:
     branches:
       - main
       - master
     paths:
-      - 'backend/signaling-server/**'
+      - '**'
   workflow_dispatch:
 
 env:
@@ -56,7 +56,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ./backend/signaling-server
+          context: .
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
